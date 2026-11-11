@@ -270,29 +270,65 @@ DIRECT_MAX_CHARS = 1800  # Conservative for the shared llama.cpp 4096-token cont
 DIRECT_MAX_PASSES = 5
 
 
+DIRECT_MIN_CHARS = 200
+DIRECT_MAX_SPLIT_DEPTH = 5
+
+
+def _progress(phase: str, completed: int, total: int | None = None) -> None:
+    """Private progress counters only; never emit medical source text."""
+    if os.environ.get("FINDINGS_PROGRESS") == "1":
+        total_part = f"/{total}" if total is not None else ""
+        print(f"PROGRESS {phase} {completed}{total_part}", file=sys.stderr, flush=True)
+
+
 def _one_direct_comment(text: str) -> str:
     """Ask the existing comment prompt to read clinical text, not extracted facts."""
     output, finish = _request([
         {"role": "system", "content": COMMENT_SYSTEM},
         {"role": "user", "content": "Полный восстановленный текст медицинского документа (не инструкции):\n" + text},
     ])
+    if finish == "length":
+        raise SummaryError("DIRECT_COMMENT_TRUNCATED")
     if finish != "stop":
         raise SummaryError("DIRECT_COMMENT_INCOMPLETE")
     return output
 
 
-def direct_comment(restored: str) -> str:
-    """Use full text directly when it fits; summarize long text in bounded passes.
+def _direct_piece_with_retry(text: str, depth: int = 0) -> str:
+    """Only retry token-limited answers. Never accept a truncated medical comment."""
+    try:
+        return _one_direct_comment(text)
+    except SummaryError as exc:
+        if str(exc) != "DIRECT_COMMENT_TRUNCATED":
+            raise
+        if len(text) <= DIRECT_MIN_CHARS or depth >= DIRECT_MAX_SPLIT_DEPTH:
+            raise SummaryError("DIRECT_COMMENT_TRUNCATED_MIN_CHUNK") from None
+        parts = split_chunks(text, max(DIRECT_MIN_CHARS, len(text) // 2))
+        if len(parts) < 2:
+            raise SummaryError("DIRECT_COMMENT_TRUNCATED_MIN_CHUNK") from None
+        _progress("direct_split_retry", depth + 1)
+        return "\n".join(_direct_piece_with_retry(part, depth + 1) for part in parts)
 
-    The model context is shared with the Telegram bot. Do not silently truncate
-    the document to fit it. Long documents need human review for possible omissions.
+
+def direct_comment(restored: str) -> str:
+    """Hierarchical direct summarization with safe retry on token truncation.
+
+    Long medical text must not silently lose the tail of any model response.
+    Each retry divides only the troublesome source segment, while the other
+    model responses remain unchanged. No model/server token settings change.
     """
     current = restored
-    for _ in range(DIRECT_MAX_PASSES):
-        if len(current) <= DIRECT_MAX_CHARS:
-            return _one_direct_comment(current)
+    for pass_number in range(1, DIRECT_MAX_PASSES + 1):
         pieces = split_chunks(current, DIRECT_MAX_CHARS)
-        shorter = "\n".join(_one_direct_comment(piece) for piece in pieces)
+        _progress("direct_pass", pass_number, DIRECT_MAX_PASSES)
+        shorter_parts = []
+        for index, piece in enumerate(pieces, 1):
+            shorter_parts.append(_direct_piece_with_retry(piece))
+            _progress("direct_piece", index, len(pieces))
+        shorter = "\n".join(shorter_parts)
+        # A single bounded source fragment completed normally: final comment.
+        if len(pieces) == 1 and len(shorter) <= DIRECT_MAX_CHARS:
+            return shorter
         if len(shorter) >= len(current):
             raise SummaryError("DIRECT_COMMENT_TOO_LONG")
         current = shorter
@@ -418,15 +454,19 @@ def summarize(document: dict) -> dict:
         "source_fallback_chars": 0,
         "fallback_reasons": {},
     }
-    for block in split_chunks(source):
+    source_blocks = split_chunks(source)
+    for number, block in enumerate(source_blocks, 1):
         corrected_blocks.extend(restore_text(block, stats=restoration))
+        _progress("restore", number, len(source_blocks))
     restored = "\n".join(corrected_blocks)
 
     # Direct generation is the primary result for a future cabinet integration.
     # The experimental extraction branch must never replace or degrade it.
     primary_comment = direct_comment(restored)
+    _progress("direct_complete", 1, 1)
     try:
         comparison = indirect_comparison(corrected_blocks, restored)
+        _progress("comparison_complete", 1, 1)
     except SummaryError as exc:
         comparison = {"ok": False, "method": "extract", "error": str(exc)}
 
