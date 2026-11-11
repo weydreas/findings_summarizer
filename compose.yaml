@@ -7,6 +7,8 @@ services:
     environment:
       LLM_URL: http://llm:8080/v1/chat/completions
       LLM_MODEL: local
+      # Use 32k only after the shared llama.cpp server is upgraded and verified.
+      FINDINGS_CONTEXT_PROFILE: ${FINDINGS_CONTEXT_PROFILE:-legacy}
     networks:
       - qwen_private
     read_only: true
