@@ -392,12 +392,16 @@ def comment_from_extracted_facts(fact_lists: dict) -> tuple[str, str]:
         if finish != "stop":
             raise SummaryError("COMMENT_INCOMPLETE")
         partial.append(output)
+        _progress("extract_comment_batch", number, len(groups))
     return direct_comment("\n".join(partial)), "hierarchical"
 
 
 def indirect_comparison(corrected_blocks: list[str], restored: str) -> dict:
     """Retain the original extract -> structured facts -> comment path for review."""
-    fragments = [facts for block in corrected_blocks for facts in extract_facts(block)]
+    fragments = []
+    for index, block in enumerate(corrected_blocks, 1):
+        fragments.extend(extract_facts(block))
+        _progress("extract", index, len(corrected_blocks))
     categories = ("diagnoses", "measurements", "treatments_and_followup", "uncertainties")
     merged = {key: unique_strings([value for part in fragments for value in part[key]])
               for key in categories}
