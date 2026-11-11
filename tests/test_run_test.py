@@ -62,7 +62,12 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
                 self.assertEqual((folder / "input.json").stat().st_mode & 0o777, 0o600)
                 self.assertEqual((folder / "direct.json").stat().st_mode & 0o777, 0o600)
+                self.assertTrue((folder / "stderr.log").exists())
+                self.assertEqual((folder / "stderr.log").stat().st_mode & 0o777, 0o600)
             self.assertEqual(docker.call_count, 2)
+            for call in docker.call_args_list:
+                self.assertIn("FINDINGS_PROGRESS=1", call.args[0])
+                self.assertTrue(hasattr(call.kwargs["stderr"], "write"))
 
     def test_docker_failure_archives_errors_not_a_false_success(self):
         with TemporaryDirectory() as d:
