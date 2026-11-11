@@ -1,0 +1,24 @@
+# This project is a client, not another model server.
+# It attaches only to the existing, non-public llama.cpp Docker network.
+services:
+  findings:
+    build: .
+    profiles: ["medical"]
+    environment:
+      LLM_URL: http://llm:8080/v1/chat/completions
+      LLM_MODEL: local
+    networks:
+      - qwen_private
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    restart: "no"
+    # No env_file, volumes, host ports, background workers, bot token or model weights.
+
+networks:
+  qwen_private:
+    external: true
+    name: ${LLM_DOCKER_NETWORK:-text-to-voice-tg-bot_default}
