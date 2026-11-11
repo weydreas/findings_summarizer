@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-MAX_INPUT_CHARS = 16000
+MAX_INPUT_CHARS = 65536
 CHUNK_SIZE = 750
 MIN_CHUNK_SIZE = 280
 
