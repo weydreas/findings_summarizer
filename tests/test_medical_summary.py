@@ -117,6 +117,37 @@ class MedicalSummaryTests(unittest.TestCase):
                 med.direct_comment("Документ с краткой записью.")
         self.assertEqual(request.call_count, 1)
 
+    def test_opt_in_32k_profile_uses_larger_batches(self):
+        src = "Исходный медицинский текст. " * 400
+        with patch.dict(med.os.environ, {"FINDINGS_CONTEXT_PROFILE": "legacy"}):
+            self.assertEqual(med._source_chunk_size(), 750)
+            self.assertEqual(med._direct_input_limit(), 1800)
+            self.assertEqual(med._comparison_batch_limit(), 2400)
+            with patch.object(med, "_one_direct_comment", return_value="Комментарий.") as request:
+                self.assertEqual(med.direct_comment(src), "Комментарий.")
+                legacy_calls = request.call_count
+        with patch.dict(med.os.environ, {"FINDINGS_CONTEXT_PROFILE": "32k"}):
+            self.assertEqual(med._source_chunk_size(), 1500)
+            self.assertEqual(med._direct_input_limit(), 16000)
+            self.assertEqual(med._comparison_batch_limit(), 8000)
+            with patch.object(med, "_one_direct_comment", return_value="Комментарий.") as request:
+                self.assertEqual(med.direct_comment(src), "Комментарий.")
+                self.assertEqual(request.call_count, 1)
+        self.assertGreater(legacy_calls, 1)
+
+    def test_invalid_context_profile_rejected(self):
+        with patch.dict(med.os.environ, {"FINDINGS_CONTEXT_PROFILE": "wrong"}):
+            with self.assertRaisesRegex(med.SummaryError, "INVALID_CONTEXT_PROFILE"):
+                med.summarize({"document_id": "profile-case", "content": "Краткое исследование."})
+
+    def test_32k_profile_requests_larger_completion_budget(self):
+        response = {"choices": [{"message": {"content": "Тест"}, "finish_reason": "stop"}]}
+        with patch.object(med.httpx, "Client") as client:
+            client.return_value.__enter__.return_value.post.return_value.json.return_value = response
+            with patch.dict(med.os.environ, {"FINDINGS_CONTEXT_PROFILE": "32k"}):
+                self.assertEqual(med._request([{"role": "user", "content": "тест"}]), ("Тест", "stop"))
+            self.assertEqual(client.return_value.__enter__.return_value.post.call_args.kwargs["json"]["max_tokens"], 2048)
+
     def test_rejects_invalid_schema_and_bad_identifiers(self):
         with self.assertRaises(med.SummaryError):
             med._validate_facts({"diagnoses": []})
