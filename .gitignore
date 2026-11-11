@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+mask-*.json
+*-result.json
+outputs/
+inputs/
+data/
+*.log
