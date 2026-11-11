@@ -76,6 +76,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         "document_id": result.get("document_id"),
         "comment": result.get("comment"),
         "restored_text": result.get("restored_text"),
+        "restoration": result.get("restoration"),
         "review_required": result.get("review_required", True),
         "review_flags": result.get("review_flags", []),
     }
