@@ -103,6 +103,59 @@ class MedicalSummaryTests(unittest.TestCase):
             with self.assertRaisesRegex(med.SummaryError, "RESTORATION_TRUNCATED"):
                 med.restore_text("Текст " * 10)
 
+    def test_length_mismatch_retries_with_smaller_fragments(self):
+        src = "Нормальные показатели крови, давление и пульс. " * 17
+        stats = {
+            "retry_splits": 0, "source_fallback_blocks": 0,
+            "source_fallback_chars": 0, "fallback_reasons": {},
+        }
+
+        def model(messages, *, schema=None):
+            block = messages[1]["content"].split("\n", 1)[1]
+            if len(block) > med.MIN_CHUNK_SIZE:
+                return "слишком коротко", "stop"
+            return block, "stop"
+
+        with patch.object(med, "_request", side_effect=model):
+            parts = med.restore_text(src, stats=stats)
+        self.assertGreater(stats["retry_splits"], 0)
+        self.assertEqual(stats["source_fallback_blocks"], 0)
+        self.assertEqual(" ".join(parts).split(), src.split())
+
+    def test_final_restoration_fallback_preserves_source_and_warns(self):
+        src = "Сложный лабораторный результат: калий 3,3 ммоль/л."
+        facts = {
+            "diagnoses": [], "findings": [], "measurements": [],
+            "treatments_and_followup": [], "uncertainties": [],
+        }
+        with patch.object(med, "_request", side_effect=[
+            ("ошибка", "stop"),  # invalid ratio, too small to split further
+            ("Прямой комментарий.", "stop"),
+            (json.dumps(facts, ensure_ascii=False), "stop"),
+            ("Комментарий из фактов.", "stop"),
+        ]):
+            result = med.summarize({"document_id": "fallback-case", "content": src})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["restored_text"], src)
+        self.assertEqual(result["comment"], "Прямой комментарий.")
+        self.assertEqual(result["comparison"]["comment"], "Комментарий из фактов.")
+        self.assertEqual(result["restoration"]["source_fallback_blocks"], 1)
+        self.assertEqual(result["restoration"]["source_fallback_chars"], len(src))
+        self.assertEqual(result["restoration"]["fallback_reasons"], {
+            "RESTORATION_LENGTH_MISMATCH": 1,
+        })
+        self.assertTrue(any("без автоматического восстановления" in x for x in result["review_flags"]))
+
+    def test_network_error_remains_fatal_in_fallback_mode(self):
+        stats = {
+            "retry_splits": 0, "source_fallback_blocks": 0,
+            "source_fallback_chars": 0, "fallback_reasons": {},
+        }
+        with patch.object(med, "_request", side_effect=med.SummaryError("LOCAL_LLM_REQUEST_FAILED")):
+            with self.assertRaisesRegex(med.SummaryError, "LOCAL_LLM_REQUEST_FAILED"):
+                med.restore_text("Нормальный текст.", stats=stats)
+        self.assertEqual(stats["source_fallback_blocks"], 0)
+
     def test_does_not_echo_document_on_error(self):
         with patch.object(med, "_request", side_effect=med.SummaryError("LOCAL_LLM_REQUEST_FAILED")):
             with self.assertRaisesRegex(med.SummaryError, "LOCAL_LLM_REQUEST_FAILED"):
