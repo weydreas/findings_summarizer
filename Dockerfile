@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY medical_summary.py ./
 COPY tests/ ./tests/
 USER 65534:65534
-ENTRYPOINT ["python", "medical_summary.py"]
+CMD ["python", "medical_summary.py"]
