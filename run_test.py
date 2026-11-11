@@ -53,6 +53,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
     # Write per-stage progress to a private file while the model is running,
     # rather than keeping all diagnostics in memory until the container exits.
     print(f"Processing: {folder}", flush=True)
+    print(f"Context profile: {os.environ.get('FINDINGS_CONTEXT_PROFILE', 'legacy')}", flush=True)
     print(f"Progress log: {folder / 'stderr.log'}", flush=True)
     try:
         with (folder / "stderr.log").open("xb") as log:
@@ -100,6 +101,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         "primary_method": "direct",
         "comparison_method": "extract",
         "model_label": model_label,
+        "context_profile": os.environ.get("FINDINGS_CONTEXT_PROFILE", "legacy"),
         "schema_version": result.get("schema_version"),
     })
     return folder, 0 if result.get("ok") and exit_code == 0 else (exit_code or 1)
