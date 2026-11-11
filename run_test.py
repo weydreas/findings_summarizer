@@ -27,8 +27,10 @@ def save_private_json(path: Path, value: object) -> None:
         handle.write("\n")
 
 
-def run_one(source_path: Path) -> tuple[Path, int]:
+def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple[Path, int]:
     os.umask(0o077)
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", model_label):
+        raise ValueError("INVALID_MODEL_LABEL")
     source = source_path.read_bytes()
     try:
         source_json = json.loads(source)
@@ -90,6 +92,7 @@ def run_one(source_path: Path) -> tuple[Path, int]:
         "exit_code": exit_code,
         "primary_method": "direct",
         "comparison_method": "extract",
+        "model_label": model_label,
         "schema_version": result.get("schema_version"),
     })
     if completed is not None and completed.stderr:
@@ -103,9 +106,10 @@ def run_one(source_path: Path) -> tuple[Path, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Archive direct + extract Qwen results locally")
     parser.add_argument("input_json", type=Path, help="medical document JSON file")
+    parser.add_argument("--model-label", default="qwen3-1.7b-q4km", help="Label to compare later model runs")
     args = parser.parse_args()
     try:
-        folder, code = run_one(args.input_json)
+        folder, code = run_one(args.input_json, model_label=args.model_label)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"RUN_SETUP_FAILED: {type(exc).__name__}", file=sys.stderr)
         return 1
