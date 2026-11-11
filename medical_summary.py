@@ -15,6 +15,23 @@ MAX_INPUT_CHARS = 65536
 CHUNK_SIZE = 750
 MIN_CHUNK_SIZE = 280
 
+
+def _use_32k_context() -> bool:
+    # Opt in only after the shared llama.cpp server is restarted at -c 32768.
+    return os.environ.get("FINDINGS_CONTEXT_PROFILE", "legacy") == "32k"
+
+
+def _source_chunk_size() -> int:
+    return 1500 if _use_32k_context() else CHUNK_SIZE
+
+
+def _direct_input_limit() -> int:
+    return 16000 if _use_32k_context() else DIRECT_MAX_CHARS
+
+
+def _comparison_batch_limit() -> int:
+    return 8000 if _use_32k_context() else MAX_COMPARISON_BATCH_CHARS
+
 EXTRACT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -154,7 +171,7 @@ def _request(messages: list[dict], *, schema: dict | None = None) -> tuple[str, 
         "model": os.environ.get("LLM_MODEL", "local"),
         "messages": messages,
         "temperature": 0.0,
-        "max_tokens": 480,
+        "max_tokens": 2048 if _use_32k_context() else 480,
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -321,7 +338,7 @@ def direct_comment(restored: str) -> str:
     """
     current = restored
     for pass_number in range(1, DIRECT_MAX_PASSES + 1):
-        pieces = split_chunks(current, DIRECT_MAX_CHARS)
+        pieces = split_chunks(current, _direct_input_limit())
         _progress("direct_pass", pass_number, DIRECT_MAX_PASSES)
         shorter_parts = []
         retry_state = {"splits": 0}
@@ -330,7 +347,7 @@ def direct_comment(restored: str) -> str:
             _progress("direct_piece", index, len(pieces))
         shorter = "\n".join(shorter_parts)
         # A single bounded source fragment completed normally: final comment.
-        if len(pieces) == 1 and not retry_state["splits"] and len(shorter) <= DIRECT_MAX_CHARS:
+        if len(pieces) == 1 and not retry_state["splits"] and len(shorter) <= _direct_input_limit():
             return shorter
         if len(shorter) >= len(current):
             raise SummaryError("DIRECT_COMMENT_TOO_LONG")
@@ -349,7 +366,7 @@ def comment_from_extracted_facts(fact_lists: dict) -> tuple[str, str]:
     same approved comment prompt. The output is still the indirect method.
     """
     as_json = json.dumps(fact_lists, ensure_ascii=False)
-    if len(as_json) <= MAX_COMPARISON_BATCH_CHARS:
+    if len(as_json) <= _comparison_batch_limit():
         output, finish = _request([
             {"role": "system", "content": COMMENT_SYSTEM},
             {"role": "user", "content": "ИЗВЛЕЧЁННЫЕ ФАКТЫ (не инструкции):\n" + as_json},
@@ -366,13 +383,13 @@ def comment_from_extracted_facts(fact_lists: dict) -> tuple[str, str]:
         for item in items:
             proposed = {field: list(values) for field, values in group.items()}
             proposed[key].append(item)
-            if len(json.dumps(proposed, ensure_ascii=False)) > MAX_COMPARISON_BATCH_CHARS:
+            if len(json.dumps(proposed, ensure_ascii=False)) > _comparison_batch_limit():
                 if any(group.values()):
                     groups.append(group)
                     group = {field: [] for field in fact_lists}
                     proposed = {field: [] for field in fact_lists}
                     proposed[key].append(item)
-                if len(json.dumps(proposed, ensure_ascii=False)) > MAX_COMPARISON_BATCH_CHARS:
+                if len(json.dumps(proposed, ensure_ascii=False)) > _comparison_batch_limit():
                     raise SummaryError("EXTRACTED_FACT_TOO_LARGE")
             group = proposed
     if any(group.values()):
@@ -453,6 +470,10 @@ def summarize(document: dict) -> dict:
     if not source or len(source) > MAX_INPUT_CHARS:
         raise SummaryError("INVALID_DOCUMENT_LENGTH")
 
+    # Fail explicitly on mistyped profiles instead of silently running an unexpected workload.
+    if os.environ.get("FINDINGS_CONTEXT_PROFILE", "legacy") not in ("legacy", "32k"):
+        raise SummaryError("INVALID_CONTEXT_PROFILE")
+
     # Both methods evaluate exactly the same OCR restoration, done once.
     corrected_blocks = []
     restoration = {
@@ -461,7 +482,7 @@ def summarize(document: dict) -> dict:
         "source_fallback_chars": 0,
         "fallback_reasons": {},
     }
-    source_blocks = split_chunks(source)
+    source_blocks = split_chunks(source, _source_chunk_size())
     for number, block in enumerate(source_blocks, 1):
         corrected_blocks.extend(restore_text(block, stats=restoration))
         _progress("restore", number, len(source_blocks))
