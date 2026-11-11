@@ -87,6 +87,36 @@ class MedicalSummaryTests(unittest.TestCase):
         for call in direct.call_args_list:
             self.assertLessEqual(len(call.args[0]), med.DIRECT_MAX_CHARS)
 
+    def test_truncated_direct_comment_retries_and_finishes(self):
+        src = "Наблюдение: параметры в пределах референса. " * 30
+        calls = []
+
+        def respond(part):
+            calls.append(len(part))
+            if len(part) > 700:
+                raise med.SummaryError("DIRECT_COMMENT_TRUNCATED")
+            if "Наблюдение:" in part:
+                return "Частичный клинический комментарий."
+            return "Завершённый краткий комментарий."
+
+        with patch.object(med, "_one_direct_comment", side_effect=respond):
+            result = med.direct_comment(src)
+        self.assertEqual(result, "Завершённый краткий комментарий.")
+        self.assertGreater(len(calls), 2)
+        self.assertGreater(max(calls), 700)
+        self.assertLessEqual(max(calls), med.DIRECT_MAX_CHARS)
+
+    def test_unrecoverable_short_direct_output_never_accepted(self):
+        with patch.object(med, "_request", return_value=("Незавершённый фрагмент", "length")):
+            with self.assertRaisesRegex(med.SummaryError, "DIRECT_COMMENT_TRUNCATED_MIN_CHUNK"):
+                med.direct_comment("Сложная формулировка длиной меньше двухсот символов.")
+
+    def test_non_token_direct_error_is_not_retried(self):
+        with patch.object(med, "_request", return_value=("Текст.", "content_filter")) as request:
+            with self.assertRaisesRegex(med.SummaryError, "DIRECT_COMMENT_INCOMPLETE"):
+                med.direct_comment("Документ с краткой записью.")
+        self.assertEqual(request.call_count, 1)
+
     def test_rejects_invalid_schema_and_bad_identifiers(self):
         with self.assertRaises(med.SummaryError):
             med._validate_facts({"diagnoses": []})

@@ -49,12 +49,18 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
                       if source.strip() else {"_invalid_input": "empty"})
 
     command = ["docker", "compose", "--profile", "medical", "run",
-               "--rm", "--no-deps", "-T", "findings"]
+               "--rm", "--no-deps", "-T", "-e", "FINDINGS_PROGRESS=1", "findings"]
+    # Write per-stage progress to a private file while the model is running,
+    # rather than keeping all diagnostics in memory until the container exits.
+    print(f"Processing: {folder}", flush=True)
+    print(f"Progress log: {folder / 'stderr.log'}", flush=True)
     try:
-        completed = subprocess.run(
-            command, input=source, cwd=ROOT,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
+        with (folder / "stderr.log").open("xb") as log:
+            os.fchmod(log.fileno(), 0o600)
+            completed = subprocess.run(
+                command, input=source, cwd=ROOT,
+                stdout=subprocess.PIPE, stderr=log, check=False,
+            )
         exit_code = completed.returncode
         try:
             result = json.loads(completed.stdout.decode("utf-8"))
@@ -96,11 +102,6 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         "model_label": model_label,
         "schema_version": result.get("schema_version"),
     })
-    if completed is not None and completed.stderr:
-        # Private diagnostic copy; never echo stderr or clinical text on screen.
-        with (folder / "stderr.log").open("x", encoding="utf-8") as handle:
-            os.chmod(folder / "stderr.log", 0o600)
-            handle.write(completed.stderr.decode("utf-8", errors="replace"))
     return folder, 0 if result.get("ok") and exit_code == 0 else (exit_code or 1)
 
 
