@@ -20,7 +20,7 @@ class MedicalSummaryTests(unittest.TestCase):
         self.assertGreater(len(blocks), 2)
         self.assertEqual(" ".join(blocks), src.strip())
 
-    def test_full_pipeline_uses_same_llm_and_returns_verified_shape(self):
+    def test_direct_comment_is_primary_and_extract_is_comparison(self):
         src = "УЗИ почек. Основной диагноз: нефрит. Почки без изменений. Печень увеличена."
         facts = {
             "diagnoses": ["нефрит"],
@@ -33,16 +33,59 @@ class MedicalSummaryTests(unittest.TestCase):
             "uncertainties": [],
         }
         with patch.object(med, "_request", side_effect=[
-            (src, "stop"),
-            (json.dumps(facts, ensure_ascii=False), "stop"),
-            ("Нефрит. Почки без изменений. Печень увеличена.", "stop"),
+            (src, "stop"),  # OCR restoration
+            ("Прямой комментарий.", "stop"),  # direct text -> summary
+            (json.dumps(facts, ensure_ascii=False), "stop"),  # legacy extraction
+            ("Сравнительный комментарий.", "stop"),  # legacy facts -> summary
         ]) as request:
             result = med.summarize({"document_id": "test-1", "format": "text", "content": src})
         self.assertTrue(result["ok"])
         self.assertTrue(result["review_required"])
-        self.assertEqual(len(result["findings"]), 2)
-        self.assertEqual(request.call_count, 3)
+        self.assertEqual(result["primary_method"], "direct")
+        self.assertEqual(result["schema_version"], "medical-summary-v2")
+        self.assertEqual(result["comment"], "Прямой комментарий.")
         self.assertEqual(result["restored_text"], src)
+        self.assertTrue(result["comparison"]["ok"])
+        self.assertEqual(result["comparison"]["comment"], "Сравнительный комментарий.")
+        self.assertEqual(len(result["comparison"]["findings"]), 2)
+        self.assertEqual(request.call_count, 4)
+        direct_messages = request.call_args_list[1].args[0]
+        self.assertIn(src, direct_messages[1]["content"])
+        self.assertNotIn("ИЗВЛЕЧЁННЫЕ ФАКТЫ", direct_messages[1]["content"])
+        legacy_messages = request.call_args_list[3].args[0]
+        self.assertIn("ИЗВЛЕЧЁННЫЕ ФАКТЫ", legacy_messages[1]["content"])
+
+    def test_comparison_failure_does_not_erase_primary_result(self):
+        src = "Исследование без отклонений."
+        with patch.object(med, "_request", side_effect=[
+            (src, "stop"),
+            ("Без существенных изменений.", "stop"),
+            med.SummaryError("INVALID_FACTS_JSON"),
+        ]):
+            result = med.summarize({"document_id": "test-2", "content": src})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["comment"], "Без существенных изменений.")
+        self.assertEqual(result["comparison"], {
+            "ok": False, "method": "extract", "error": "INVALID_FACTS_JSON"
+        })
+
+    def test_primary_failure_is_not_hidden(self):
+        src = "Исследование без отклонений."
+        with patch.object(med, "_request", side_effect=[
+            (src, "stop"), med.SummaryError("LOCAL_LLM_REQUEST_FAILED"),
+        ]) as request:
+            with self.assertRaisesRegex(med.SummaryError, "LOCAL_LLM_REQUEST_FAILED"):
+                med.summarize({"document_id": "test-3", "content": src})
+        self.assertEqual(request.call_count, 2)
+
+    def test_long_document_uses_bounded_direct_chunks(self):
+        long_text = "Нормальный результат обследования.\n" * 120
+        with patch.object(med, "_one_direct_comment", return_value="Краткая сводка.") as direct:
+            result = med.direct_comment(long_text)
+        self.assertEqual(result, "Краткая сводка.")
+        self.assertGreater(direct.call_count, 1)
+        for call in direct.call_args_list:
+            self.assertLessEqual(len(call.args[0]), med.DIRECT_MAX_CHARS)
 
     def test_rejects_invalid_schema_and_bad_identifiers(self):
         with self.assertRaises(med.SummaryError):
