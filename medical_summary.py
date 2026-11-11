@@ -267,7 +267,7 @@ def unique_strings(items: list[str]) -> list[str]:
 
 
 DIRECT_MAX_CHARS = 1800  # Conservative for the shared llama.cpp 4096-token context.
-DIRECT_MAX_PASSES = 5
+DIRECT_MAX_PASSES = 8
 
 
 DIRECT_MIN_CHARS = 200
@@ -294,7 +294,7 @@ def _one_direct_comment(text: str) -> str:
     return output
 
 
-def _direct_piece_with_retry(text: str, depth: int = 0) -> str:
+def _direct_piece_with_retry(text: str, depth: int = 0, *, retry_state: dict | None = None) -> str:
     """Only retry token-limited answers. Never accept a truncated medical comment."""
     try:
         return _one_direct_comment(text)
@@ -306,8 +306,10 @@ def _direct_piece_with_retry(text: str, depth: int = 0) -> str:
         parts = split_chunks(text, max(DIRECT_MIN_CHARS, len(text) // 2))
         if len(parts) < 2:
             raise SummaryError("DIRECT_COMMENT_TRUNCATED_MIN_CHUNK") from None
+        if retry_state is not None:
+            retry_state["splits"] += 1
         _progress("direct_split_retry", depth + 1)
-        return "\n".join(_direct_piece_with_retry(part, depth + 1) for part in parts)
+        return "\n".join(_direct_piece_with_retry(part, depth + 1, retry_state=retry_state) for part in parts)
 
 
 def direct_comment(restored: str) -> str:
@@ -322,12 +324,13 @@ def direct_comment(restored: str) -> str:
         pieces = split_chunks(current, DIRECT_MAX_CHARS)
         _progress("direct_pass", pass_number, DIRECT_MAX_PASSES)
         shorter_parts = []
+        retry_state = {"splits": 0}
         for index, piece in enumerate(pieces, 1):
-            shorter_parts.append(_direct_piece_with_retry(piece))
+            shorter_parts.append(_direct_piece_with_retry(piece, retry_state=retry_state))
             _progress("direct_piece", index, len(pieces))
         shorter = "\n".join(shorter_parts)
         # A single bounded source fragment completed normally: final comment.
-        if len(pieces) == 1 and len(shorter) <= DIRECT_MAX_CHARS:
+        if len(pieces) == 1 and not retry_state["splits"] and len(shorter) <= DIRECT_MAX_CHARS:
             return shorter
         if len(shorter) >= len(current):
             raise SummaryError("DIRECT_COMMENT_TOO_LONG")
