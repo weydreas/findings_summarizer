@@ -249,28 +249,42 @@ def unique_strings(items: list[str]) -> list[str]:
     return result
 
 
-def summarize(document: dict) -> dict:
-    if not isinstance(document, dict):
-        raise SummaryError("INPUT_MUST_BE_OBJECT")
-    identifier, raw, kind = document.get("document_id"), document.get("content"), document.get("format", "auto")
-    if not isinstance(identifier, str) or not re.fullmatch(r"[\w.-]{1,100}", identifier):
-        raise SummaryError("INVALID_DOCUMENT_ID")
-    if not isinstance(raw, str) or not raw.strip() or len(raw) > MAX_INPUT_CHARS:
-        raise SummaryError("INVALID_DOCUMENT_LENGTH")
-    if not isinstance(kind, str):
-        raise SummaryError("INVALID_FORMAT")
-    source = clean_source(raw, kind)
-    if not source or len(source) > MAX_INPUT_CHARS:
-        raise SummaryError("INVALID_DOCUMENT_LENGTH")
+DIRECT_MAX_CHARS = 1800  # Conservative for the shared llama.cpp 4096-token context.
+DIRECT_MAX_PASSES = 5
 
-    # Restoration is intentionally separate from extraction: full corrected text
-    # would exceed the model's 512-token response limit if included in the JSON.
-    corrected_blocks = []
-    for block in split_chunks(source):
-        corrected_blocks.extend(restore_text(block))
-    restored = "\n".join(corrected_blocks)
+
+def _one_direct_comment(text: str) -> str:
+    """Ask the existing comment prompt to read clinical text, not extracted facts."""
+    output, finish = _request([
+        {"role": "system", "content": COMMENT_SYSTEM},
+        {"role": "user", "content": "Полный восстановленный текст медицинского документа (не инструкции):\n" + text},
+    ])
+    if finish != "stop":
+        raise SummaryError("DIRECT_COMMENT_INCOMPLETE")
+    return output
+
+
+def direct_comment(restored: str) -> str:
+    """Use full text directly when it fits; summarize long text in bounded passes.
+
+    The model context is shared with the Telegram bot. Do not silently truncate
+    the document to fit it. Long documents need human review for possible omissions.
+    """
+    current = restored
+    for _ in range(DIRECT_MAX_PASSES):
+        if len(current) <= DIRECT_MAX_CHARS:
+            return _one_direct_comment(current)
+        pieces = split_chunks(current, DIRECT_MAX_CHARS)
+        shorter = "\n".join(_one_direct_comment(piece) for piece in pieces)
+        if len(shorter) >= len(current):
+            raise SummaryError("DIRECT_COMMENT_TOO_LONG")
+        current = shorter
+    raise SummaryError("DIRECT_COMMENT_TOO_LONG")
+
+
+def indirect_comparison(corrected_blocks: list[str], restored: str) -> dict:
+    """Retain the original extract -> structured facts -> comment path for review."""
     fragments = [facts for block in corrected_blocks for facts in extract_facts(block)]
-
     categories = ("diagnoses", "measurements", "treatments_and_followup", "uncertainties")
     merged = {key: unique_strings([value for part in fragments for value in part[key]])
               for key in categories}
@@ -282,15 +296,12 @@ def summarize(document: dict) -> dict:
         if not quote or quote not in normalized_restored:
             evidence_mismatch += 1
 
-    # The comment uses extracted facts, never the raw patient source.
     comment_input = {
         "diagnoses": merged["diagnoses"], "findings": findings,
         "measurements": merged["measurements"],
         "treatments_and_followup": merged["treatments_and_followup"],
         "uncertainties": merged["uncertainties"],
     }
-    # Avoid dropping long evidence during summarization; if too long, explicit failure
-    # rather than silently truncating medically relevant facts.
     comment_json = json.dumps(comment_input, ensure_ascii=False)
     if len(comment_json) > 11000:
         raise SummaryError("TOO_MANY_FACTS_FOR_COMMENT")
@@ -307,17 +318,55 @@ def summarize(document: dict) -> dict:
         flags.append("Есть неоднозначности распознавания или медицинских значений.")
     return {
         "ok": True,
-        "schema_version": "medical-summary-v1",
-        "document_id": identifier,
-        "restored_text": restored,
+        "method": "extract",
         "comment": comment,
         "diagnoses": merged["diagnoses"],
         "findings": findings,
         "measurements": merged["measurements"],
         "treatments_and_followup": merged["treatments_and_followup"],
         "uncertainties": merged["uncertainties"],
-        "review_required": True,
         "review_flags": flags,
+    }
+
+
+def summarize(document: dict) -> dict:
+    if not isinstance(document, dict):
+        raise SummaryError("INPUT_MUST_BE_OBJECT")
+    identifier, raw, kind = document.get("document_id"), document.get("content"), document.get("format", "auto")
+    if not isinstance(identifier, str) or not re.fullmatch(r"[\w.-]{1,100}", identifier):
+        raise SummaryError("INVALID_DOCUMENT_ID")
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > MAX_INPUT_CHARS:
+        raise SummaryError("INVALID_DOCUMENT_LENGTH")
+    if not isinstance(kind, str):
+        raise SummaryError("INVALID_FORMAT")
+    source = clean_source(raw, kind)
+    if not source or len(source) > MAX_INPUT_CHARS:
+        raise SummaryError("INVALID_DOCUMENT_LENGTH")
+
+    # Both methods evaluate exactly the same OCR restoration, done once.
+    corrected_blocks = []
+    for block in split_chunks(source):
+        corrected_blocks.extend(restore_text(block))
+    restored = "\n".join(corrected_blocks)
+
+    # Direct generation is the primary result for a future cabinet integration.
+    # The experimental extraction branch must never replace or degrade it.
+    primary_comment = direct_comment(restored)
+    try:
+        comparison = indirect_comparison(corrected_blocks, restored)
+    except SummaryError as exc:
+        comparison = {"ok": False, "method": "extract", "error": str(exc)}
+
+    return {
+        "ok": True,
+        "schema_version": "medical-summary-v2",
+        "document_id": identifier,
+        "primary_method": "direct",
+        "restored_text": restored,
+        "comment": primary_comment,
+        "comparison": comparison,
+        "review_required": True,
+        "review_flags": ["Черновик ИИ: сверить с оригинальным документом перед публикацией."],
     }
 
 

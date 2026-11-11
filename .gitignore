@@ -9,3 +9,4 @@ outputs/
 inputs/
 data/
 *.log
+test_results/
