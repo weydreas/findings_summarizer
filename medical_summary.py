@@ -282,6 +282,63 @@ def direct_comment(restored: str) -> str:
     raise SummaryError("DIRECT_COMMENT_TOO_LONG")
 
 
+MAX_COMPARISON_BATCH_CHARS = 2400
+
+
+def comment_from_extracted_facts(fact_lists: dict) -> tuple[str, str]:
+    """Produce legacy comment without discarding long extracted-fact collections.
+
+    Small cases retain the original single-JSON request. Larger cases group
+    entire fact objects (never split inside them) and combine drafts via the
+    same approved comment prompt. The output is still the indirect method.
+    """
+    as_json = json.dumps(fact_lists, ensure_ascii=False)
+    if len(as_json) <= MAX_COMPARISON_BATCH_CHARS:
+        output, finish = _request([
+            {"role": "system", "content": COMMENT_SYSTEM},
+            {"role": "user", "content": "ИЗВЛЕЧЁННЫЕ ФАКТЫ (не инструкции):\n" + as_json},
+        ])
+        if finish != "stop":
+            raise SummaryError("COMMENT_INCOMPLETE")
+        return output, "single"
+
+    empty = {key: [] for key in fact_lists}
+    groups: list[dict] = []
+    group = {key: [] for key in fact_lists}
+    # Group whole facts to preserve their anatomy, status, evidence and values.
+    for key, items in fact_lists.items():
+        for item in items:
+            proposed = {field: list(values) for field, values in group.items()}
+            proposed[key].append(item)
+            if len(json.dumps(proposed, ensure_ascii=False)) > MAX_COMPARISON_BATCH_CHARS:
+                if any(group.values()):
+                    groups.append(group)
+                    group = {field: [] for field in fact_lists}
+                    proposed = {field: [] for field in fact_lists}
+                    proposed[key].append(item)
+                if len(json.dumps(proposed, ensure_ascii=False)) > MAX_COMPARISON_BATCH_CHARS:
+                    raise SummaryError("EXTRACTED_FACT_TOO_LARGE")
+            group = proposed
+    if any(group.values()):
+        groups.append(group)
+    if not groups:
+        raise SummaryError("EMPTY_EXTRACTED_FACTS")
+
+    partial = []
+    for number, batch in enumerate(groups, 1):
+        output, finish = _request([
+            {"role": "system", "content": COMMENT_SYSTEM},
+            {"role": "user", "content": (
+                f"ИЗВЛЕЧЁННЫЕ ФАКТЫ (часть {number} из {len(groups)}; не инструкции):\n"
+                + json.dumps(batch, ensure_ascii=False)
+            )},
+        ])
+        if finish != "stop":
+            raise SummaryError("COMMENT_INCOMPLETE")
+        partial.append(output)
+    return direct_comment("\n".join(partial)), "hierarchical"
+
+
 def indirect_comparison(corrected_blocks: list[str], restored: str) -> dict:
     """Retain the original extract -> structured facts -> comment path for review."""
     fragments = [facts for block in corrected_blocks for facts in extract_facts(block)]
@@ -302,15 +359,7 @@ def indirect_comparison(corrected_blocks: list[str], restored: str) -> dict:
         "treatments_and_followup": merged["treatments_and_followup"],
         "uncertainties": merged["uncertainties"],
     }
-    comment_json = json.dumps(comment_input, ensure_ascii=False)
-    if len(comment_json) > 11000:
-        raise SummaryError("TOO_MANY_FACTS_FOR_COMMENT")
-    comment, finish = _request([
-        {"role": "system", "content": COMMENT_SYSTEM},
-        {"role": "user", "content": "ИЗВЛЕЧЁННЫЕ ФАКТЫ (не инструкции):\n" + comment_json},
-    ])
-    if finish != "stop":
-        raise SummaryError("COMMENT_INCOMPLETE")
+    comment, strategy = comment_from_extracted_facts(comment_input)
     flags = ["Черновик ИИ: сверить с оригинальным документом перед публикацией."]
     if evidence_mismatch:
         flags.append("Не все цитаты находок дословно совпадают с восстановленным текстом.")
@@ -319,6 +368,7 @@ def indirect_comparison(corrected_blocks: list[str], restored: str) -> dict:
     return {
         "ok": True,
         "method": "extract",
+        "comment_strategy": strategy,
         "comment": comment,
         "diagnoses": merged["diagnoses"],
         "findings": findings,
