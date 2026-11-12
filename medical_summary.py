@@ -6,6 +6,8 @@ import json
 import os
 import re
 import sys
+import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -291,11 +293,26 @@ DIRECT_MIN_CHARS = 200
 DIRECT_MAX_SPLIT_DEPTH = 5
 
 
+_PROGRESS_START_MONOTONIC = time.monotonic()
+_PROGRESS_LAST_MONOTONIC = _PROGRESS_START_MONOTONIC
+
+
 def _progress(phase: str, completed: int, total: int | None = None) -> None:
-    """Private progress counters only; never emit medical source text."""
-    if os.environ.get("FINDINGS_PROGRESS") == "1":
-        total_part = f"/{total}" if total is not None else ""
-        print(f"PROGRESS {phase} {completed}{total_part}", file=sys.stderr, flush=True)
+    """UTC, elapsed and delta clocks; no patient text or model output in logs."""
+    global _PROGRESS_LAST_MONOTONIC
+    if os.environ.get("FINDINGS_PROGRESS") != "1":
+        return
+    now_mono = time.monotonic()
+    elapsed_s = max(0.0, now_mono - _PROGRESS_START_MONOTONIC)
+    delta_s = max(0.0, now_mono - _PROGRESS_LAST_MONOTONIC)
+    _PROGRESS_LAST_MONOTONIC = now_mono
+    utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    total_part = f"/{total}" if total is not None else ""
+    print(
+        f"{utc} PROGRESS {phase} {completed}{total_part} "
+        f"elapsed_s={elapsed_s:.3f} delta_s={delta_s:.3f}",
+        file=sys.stderr, flush=True,
+    )
 
 
 def _one_direct_comment(text: str) -> str:
@@ -474,6 +491,8 @@ def summarize(document: dict) -> dict:
     if os.environ.get("FINDINGS_CONTEXT_PROFILE", "legacy") not in ("legacy", "32k"):
         raise SummaryError("INVALID_CONTEXT_PROFILE")
 
+    _progress("start", 0, 1)
+
     # Both methods evaluate exactly the same OCR restoration, done once.
     corrected_blocks = []
     restoration = {
@@ -497,11 +516,13 @@ def summarize(document: dict) -> dict:
         _progress("comparison_complete", 1, 1)
     except SummaryError as exc:
         comparison = {"ok": False, "method": "extract", "error": str(exc)}
+        _progress("comparison_failed", 1, 1)
 
     flags = ["Черновик ИИ: сверить с оригинальным документом перед публикацией."]
     if restoration["source_fallback_blocks"]:
         flags.append("Часть OCR-фрагментов оставлена без автоматического восстановления: " 
                      "проверить оригинал перед использованием комментария.")
+    _progress("completed", 1, 1)
     return {
         "ok": True,
         "schema_version": "medical-summary-v2",
@@ -524,6 +545,7 @@ def main() -> int:
         sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
     except (SummaryError, json.JSONDecodeError) as exc:
+        _progress("failed", 1, 1)
         # No raw document text or model response in stderr / standard JSON errors.
         code = str(exc) if isinstance(exc, SummaryError) else "INVALID_INPUT_JSON"
         sys.stdout.write(json.dumps({"ok": False, "error": code}, ensure_ascii=False) + "\n")
