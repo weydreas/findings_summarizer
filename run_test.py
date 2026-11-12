@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parent
@@ -28,6 +29,8 @@ def save_private_json(path: Path, value: object) -> None:
 
 
 def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple[Path, int]:
+    started_at = datetime.now(timezone.utc)
+    monotonic_start = time.monotonic()
     os.umask(0o077)
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", model_label):
         raise ValueError("INVALID_MODEL_LABEL")
@@ -42,7 +45,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         raise RuntimeError("test_results must not be a symlink")
     RESULTS_ROOT.mkdir(mode=0o700, exist_ok=True)
     RESULTS_ROOT.chmod(0o700)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    stamp = started_at.strftime("%Y%m%dT%H%M%S_%fZ")
     folder = RESULTS_ROOT / f"{stamp}_{identifier}_{uuid.uuid4().hex[:8]}"
     folder.mkdir(mode=0o700)
     save_private_json(folder / "input.json", json.loads(source.decode("utf-8-sig"))
@@ -52,6 +55,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
                "--rm", "--no-deps", "-T", "-e", "FINDINGS_PROGRESS=1", "findings"]
     # Write per-stage progress to a private file while the model is running,
     # rather than keeping all diagnostics in memory until the container exits.
+    print(f"Started UTC: {started_at.isoformat(timespec='milliseconds')}", flush=True)
     print(f"Processing: {folder}", flush=True)
     print(f"Context profile: {os.environ.get('FINDINGS_CONTEXT_PROFILE', 'legacy')}", flush=True)
     print(f"Progress log: {folder / 'stderr.log'}", flush=True)
@@ -75,6 +79,11 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         completed = None
         result = {"ok": False, "error": "INTERRUPTED"}
 
+    finished_at = datetime.now(timezone.utc)
+    duration_seconds = round(max(0.0, time.monotonic() - monotonic_start), 3)
+    print(f"Finished UTC: {finished_at.isoformat(timespec='milliseconds')}", flush=True)
+    print(f"Elapsed seconds: {duration_seconds:.3f}", flush=True)
+
     # Full result for downstream analysis, plus separate convenient A/B artifacts.
     save_private_json(folder / "result.json", result)
     direct = {
@@ -97,6 +106,9 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
     save_private_json(folder / "run.json", {
         "document_id": result.get("document_id"),
         "timestamp_utc": stamp,
+        "started_at_utc": started_at.isoformat(timespec="milliseconds"),
+        "finished_at_utc": finished_at.isoformat(timespec="milliseconds"),
+        "duration_seconds": duration_seconds,
         "exit_code": exit_code,
         "primary_method": "direct",
         "comparison_method": "extract",

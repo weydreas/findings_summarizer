@@ -1,5 +1,7 @@
 """Offline checks; no real medical records, model weights, network or Docker required."""
 import json
+import io
+import re
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +9,27 @@ import medical_summary as med
 
 
 class MedicalSummaryTests(unittest.TestCase):
+    def test_progress_log_includes_utc_elapsed_and_delta_without_content(self):
+        log = io.StringIO()
+        with patch.dict(med.os.environ, {"FINDINGS_PROGRESS": "1"}), \
+             patch.object(med.sys, "stderr", log), \
+             patch.object(med, "_PROGRESS_START_MONOTONIC", 100.0), \
+             patch.object(med, "_PROGRESS_LAST_MONOTONIC", 120.0), \
+             patch.object(med.time, "monotonic", return_value=123.5):
+            med._progress("restore", 2, 23)
+        text = log.getvalue()
+        self.assertRegex(text, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z PROGRESS restore 2/23 ")
+        self.assertIn("elapsed_s=23.500", text)
+        self.assertIn("delta_s=3.500", text)
+        self.assertNotIn("patient", text)
+
+    def test_progress_disabled_produces_no_output(self):
+        log = io.StringIO()
+        with patch.dict(med.os.environ, {"FINDINGS_PROGRESS": "0"}), \
+             patch.object(med.sys, "stderr", log):
+            med._progress("restore", 1, 3)
+        self.assertEqual(log.getvalue(), "")
+
     def test_html_parser_preserves_multiple_organs_and_removes_scripts(self):
         html = '<html><body><p>Диагноз: А</p><table><tr><td>Почки</td><td>Без изменений</td></tr></table><p>Печень: изменена</p><script>IGNORE</script></body></html>'
         actual = med.clean_source(html, "auto")
