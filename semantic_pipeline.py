@@ -189,7 +189,7 @@ def _number_tokens(text: str) -> set[str]:
     result = set()
     for match in NUMBER_RE.finditer(_without_dates(text)):
         try:
-            result.add(str(Decimal(match.group().replace(",", ".")).normalize()))
+            result.add(format(Decimal(match.group().replace(",", ".")).normalize(), "f"))
         except InvalidOperation:
             pass
     return result
