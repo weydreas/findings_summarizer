@@ -493,6 +493,14 @@ def summarize(document: dict) -> dict:
 
     _progress("start", 0, 1)
 
+    pipeline_mode = os.environ.get("FINDINGS_PIPELINE_MODE", "legacy")
+    if pipeline_mode not in ("legacy", "evidence_v1"):
+        raise SummaryError("INVALID_PIPELINE_MODE")
+    if pipeline_mode == "evidence_v1":
+        # Imported lazily: old pipeline and old tests remain byte-for-byte compatible.
+        from evidence_pipeline import summarize as summarize_evidence
+        return summarize_evidence(identifier, source)
+
     # Both methods evaluate exactly the same OCR restoration, done once.
     corrected_blocks = []
     restoration = {
@@ -543,7 +551,7 @@ def main() -> int:
         document = json.loads(data)
         result = summarize(document)
         sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
-        return 0
+        return 0 if result.get("ok") else 1
     except (SummaryError, json.JSONDecodeError) as exc:
         _progress("failed", 1, 1)
         # No raw document text or model response in stderr / standard JSON errors.
