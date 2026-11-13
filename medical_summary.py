@@ -494,12 +494,17 @@ def summarize(document: dict) -> dict:
     _progress("start", 0, 1)
 
     pipeline_mode = os.environ.get("FINDINGS_PIPELINE_MODE", "legacy")
-    if pipeline_mode not in ("legacy", "evidence_v1"):
+    if pipeline_mode not in ("legacy", "evidence_v1", "semantic_v2"):
         raise SummaryError("INVALID_PIPELINE_MODE")
     if pipeline_mode == "evidence_v1":
-        # Imported lazily: old pipeline and old tests remain byte-for-byte compatible.
+        # Kept unchanged for historical reproducibility.
         from evidence_pipeline import summarize as summarize_evidence
         return summarize_evidence(identifier, source)
+    if pipeline_mode == "semantic_v2":
+        if not _use_32k_context():
+            raise SummaryError("SEMANTIC_V2_REQUIRES_32K")
+        from semantic_pipeline import summarize as summarize_semantic
+        return summarize_semantic(identifier, source)
 
     # Both methods evaluate exactly the same OCR restoration, done once.
     corrected_blocks = []

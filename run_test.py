@@ -110,6 +110,12 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         save_private_json(folder / "sections.json", result.get("sections", []))
         save_private_json(folder / "quality.json", result.get("quality_gate", {}))
         save_private_json(folder / "drafts.json", result.get("draft_parts", []))
+    if result.get("pipeline_mode") == "semantic_v2":
+        save_private_json(folder / "facts.json", result.get("fact_registry", []))
+        save_private_json(folder / "reviews.json", result.get("reviews", []))
+        save_private_json(folder / "selection.json", result.get("selected_ids", []))
+        save_private_json(folder / "quality.json", result.get("quality_gate", {}))
+        save_private_json(folder / "blocks.json", result.get("blocks", []))
     save_private_json(folder / "run.json", {
         "document_id": result.get("document_id"),
         "timestamp_utc": stamp,
@@ -142,6 +148,8 @@ def main() -> int:
     print("Files: input.json, direct.json, extract.json, result.json, run.json")
     if os.environ.get("FINDINGS_PIPELINE_MODE") == "evidence_v1":
         print("Evidence files: sections.json, facts.json, drafts.json, quality.json")
+    if os.environ.get("FINDINGS_PIPELINE_MODE") == "semantic_v2":
+        print("Semantic files: blocks.json, facts.json, reviews.json, selection.json, quality.json")
     return code
 
 
