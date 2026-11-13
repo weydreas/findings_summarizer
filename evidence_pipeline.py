@@ -301,7 +301,7 @@ def quality_gate(comment: str, registry: list[dict], rejected_quotes: int) -> di
                 for fact in abnormal
             )
             blanket_normal = bool(re.search(
-                r"(?i)(?:все|лабораторн\\w*|показател\\w*).*норм", line
+                r"(?i)(?:все|лабораторн\w*|показател\w*).*норм", line
             ))
             if any(fact["id"] in line_ids for fact in abnormal) or named_abnormal or (abnormal and blanket_normal):
                 suspicious_normal_lines.append(i)
