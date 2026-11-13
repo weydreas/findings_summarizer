@@ -4,6 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY medical_summary.py ./
+COPY evidence_pipeline.py ./
 COPY run_test.py ./
 COPY run_suite.py ./
 COPY examples/ ./examples/
