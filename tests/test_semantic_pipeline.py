@@ -110,6 +110,21 @@ class SemanticPipelineTests(unittest.TestCase):
         self.assertEqual(result["quality_gate"]["semantic_verdict"], "fail")
         self.assertEqual(result["quality_gate"]["semantic_issues"][0]["category"], "omission")
 
+    def test_block_reviewer_omission_blocks_false_success(self):
+        with patch.object(sem, "_extract", return_value=[
+            {"kind": "diagnosis", "claim": "Гипотония", "priority": "essential"}
+        ]), patch.object(sem, "_review", return_value=(
+            [{"id": "F0001", "verdict": "supported", "reason": "Подтверждено"}],
+            ["Пропущено падение АД до 55/40"]
+        )), patch.object(sem, "_choose", side_effect=lambda facts: facts), \
+             patch.object(sem, "_json_call", side_effect=[
+                 {"summary": "Гипотония."}, {"verdict": "pass", "issues": []}
+             ]), patch.object(med, "_progress"):
+            result = sem.summarize("synthetic", SOURCE)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["quality_gate"]["reported_omissions"], 1)
+        self.assertEqual(len(result["quality_gate"]["omission_reports"]), 1)
+
     def test_only_semantic_v2_requires_extended_context(self):
         with patch.dict(med.os.environ, {"FINDINGS_PIPELINE_MODE": "semantic_v2",
                                           "FINDINGS_CONTEXT_PROFILE": "legacy"}):
