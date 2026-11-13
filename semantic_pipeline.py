@@ -375,7 +375,7 @@ def summarize(document_id: str, source: str) -> dict:
         data = _json_call(SYNTH_PROMPT,
                           json.dumps({"selected_verified_facts": [
                               {"id": fact["id"], "claim": fact["claim"]}
-                              for fact in selected,
+                              for fact in selected
                           ]}, ensure_ascii=False), SUMMARY_SCHEMA, "SEMANTIC_SYNTH")
         summary = data["summary"]
         if not isinstance(summary, str) or not summary.strip() or len(summary) > 10000:
