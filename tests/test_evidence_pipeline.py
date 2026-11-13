@@ -57,6 +57,8 @@ class EvidenceTests(unittest.TestCase):
     def test_source_grounded_pipeline_with_targeted_repair(self):
         calls = {"extract": 0, "synth": 0}
         def request(messages, *, schema=None):
+            if schema is ev.AUDIT_SCHEMA:
+                return json.dumps({"issues": []}), "stop"
             if schema is not None:
                 calls["extract"] += 1
                 return json.dumps({"facts": []}), "stop"
@@ -79,6 +81,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_unverified_quote_is_a_hard_gate_failure(self):
         def request(messages, *, schema=None):
+            if schema is ev.AUDIT_SCHEMA:
+                return json.dumps({"issues": []}), "stop"
             if schema is not None:
                 return json.dumps({"facts": [{
                     "kind": "diagnosis", "statement": "Выдуманный диагноз",
@@ -91,6 +95,21 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("REJECTED_UNVERIFIED_QUOTES", result["quality_gate"]["issues"])
         self.assertEqual(result["quality_gate"]["rejected_quote_count"], len(ev.sectionize(SOURCE)))
+
+    def test_semantic_audit_flags_unsupported_claim_without_faking_success(self):
+        facts = []
+        ev._source_anchors(SOURCE, ev.sectionize(SOURCE), facts, set())
+        with patch.object(med, "_request", return_value=(
+            json.dumps({"issues": [{"line": 1, "code": "numeric_mismatch"}]}), "stop"
+        )), patch.object(med, "_progress"):
+            issues = ev.semantic_audit(["Сводка [F0001]"], facts)
+        self.assertEqual(issues, [{"part": 1, "line": 1, "code": "numeric_mismatch"}])
+
+    def test_discharge_treatment_change_is_mandatory(self):
+        source = "Рекомендации\nВ настоящее время прием препаратов, снижающих давление, не показан."
+        facts = []
+        ev._source_anchors(source, ev.sectionize(source), facts, set())
+        self.assertTrue(any(f["kind"] == "followup" and f["required"] for f in facts))
 
     def test_new_pipeline_is_opt_in_and_does_not_modify_default(self):
         with patch.dict(med.os.environ, {"FINDINGS_PIPELINE_MODE": "invalid"}):
