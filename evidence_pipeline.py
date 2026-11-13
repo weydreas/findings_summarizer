@@ -36,6 +36,11 @@ LAB_ROW = re.compile(
     r"[ \t]+(?P<low>\d+(?:[.,]\d+)?)[ \t]*[-–][ \t]*(?P<high>\d+(?:[.,]\d+)?)[ \t]*$"
 )
 LAB_MARKERS = ("лаборатор", "крови", "анализ", "сыворот", "гормон", "биохим", "с[іi]то")
+# A change/withholding of treatment at discharge is a high-priority historical fact.
+DISCHARGE_CHANGE = re.compile(
+    r"(?im)^[^\n]{0,250}(?:прием|приём|терапи[юя]|препарат[а-я]*|назначен[а-я]*)"
+    r"[^\n]{0,250}(?:не показан[а-я]*|отмен[а-я]*|прекрат[а-я]*|возобнов[а-я]*)[^\n]*$"
+)
 
 FACT_SYSTEM = """Извлекай атомарные клинические факты из ОДНОГО фрагмента медицинского документа.
 Верни JSON по заданной схеме. Разделяй диагноз, события/динамику, патологические и
@@ -201,10 +206,16 @@ def _source_anchors(source: str, blocks: list[dict], registry: list[dict], seen:
         _add(registry, seen, kind="diagnosis",
              statement=f"{match.group(1)}: {match.group('value').strip()}",
              source=source, start=match.start(), end=match.end(), section=section,
-             required=(kind in ("основное", "осложнения")), origin="source_anchor")
+             required=True, origin="source_anchor")
 
     for block in blocks:
         title = block["section"].casefold()
+        if "рекомендац" in title or "выписк" in title:
+            for match in DISCHARGE_CHANGE.finditer(block["text"]):
+                start, end = block["start"] + match.start(), block["start"] + match.end()
+                _add(registry, seen, kind="followup", statement=match.group().strip(),
+                     source=source, start=start, end=end, section=title,
+                     required=True, origin="source_anchor")
         # A conservative heuristic, not a comprehensive lab parser.
         if not any(re.search(marker, title) if "[" in marker else marker in title
                    for marker in LAB_MARKERS):
@@ -280,11 +291,20 @@ def quality_gate(comment: str, registry: list[dict], rejected_quotes: int) -> di
         line_ids = set(CITATION.findall(line))
         if not line_ids:
             uncited_lines.append(i)
-        if UNSUPPORTED_NORMAL.search(line) and any(
-            fact["id"] in line_ids and fact.get("lab_status") in ("above", "below")
-            for fact in registry
-        ):
-            suspicious_normal_lines.append(i)
+        if UNSUPPORTED_NORMAL.search(line):
+            abnormal = [fact for fact in registry
+                        if fact.get("lab_status") in ("above", "below")]
+            # Detect false-normal descriptions even when the model cites a
+            # different fact ID or makes an unsupported blanket statement.
+            named_abnormal = any(
+                fact["statement"].split(":", 1)[0].strip().casefold() in line.casefold()
+                for fact in abnormal
+            )
+            blanket_normal = bool(re.search(
+                r"(?i)(?:все|лабораторн\\w*|показател\\w*).*норм", line
+            ))
+            if any(fact["id"] in line_ids for fact in abnormal) or named_abnormal or (abnormal and blanket_normal):
+                suspicious_normal_lines.append(i)
     issues = []
     if not registry:
         issues.append("EMPTY_EVIDENCE_REGISTRY")
