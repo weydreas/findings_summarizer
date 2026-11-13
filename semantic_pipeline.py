@@ -135,7 +135,7 @@ FINAL_REVIEW_PROMPT = """Ты НОВЫЙ медицинский рецензен
 # Only numerical/date/unit checks: no clinical-word regular expressions.
 DATE_RE = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?!\d)")
 ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
-NUMBER_RE = re.compile(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])")
+NUMBER_RE = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)?(?![\d.,])")
 UNITS = ("мкмоль/л", "ммоль/л", "мкг/л", "нг/мл", "пг/мл",
          "г/л", "мг/дл", "мг/л", "мг", "мл", "мЕд/л", "МЕ",
          "кл/мкл", "уд/мин", "мм рт. ст.", "мм рт ст",
@@ -245,7 +245,7 @@ def _extract(text: str, depth: int = 0) -> list[dict]:
         med._progress("semantic_extract_split", depth + 1)
         return [fact for part in parts for fact in _extract(part, depth + 1)]
     facts = data["facts"]
-    if not isinstance(facts, list) or len(facts) > 12:
+    if not isinstance(facts, list) or len(facts) > 16:
         raise med.SummaryError("SEMANTIC_EXTRACT_SCHEMA_MISMATCH")
     for fact in facts:
         if (not isinstance(fact, dict) or set(fact) != {"kind", "claim", "priority"} or
@@ -258,7 +258,7 @@ def _extract(text: str, depth: int = 0) -> list[dict]:
 
 def _review(block: dict, facts: list[dict]) -> tuple[list[dict], list[str]]:
     reviewed, omissions = [], []
-    for begin in range(0, len(facts), REVIEW_BATCH_SIZE):
+    for begin in range(0, max(len(facts), 1), REVIEW_BATCH_SIZE):
         batch = facts[begin:begin + REVIEW_BATCH_SIZE]
         # Fresh call with NEW system messages; no extraction dialogue/history.
         data = _json_call(REVIEW_PROMPT, json.dumps({
