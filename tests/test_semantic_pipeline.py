@@ -125,6 +125,45 @@ class SemanticPipelineTests(unittest.TestCase):
         self.assertEqual(result["quality_gate"]["reported_omissions"], 1)
         self.assertEqual(len(result["quality_gate"]["omission_reports"]), 1)
 
+    def test_extract_splits_when_model_returns_too_many_facts(self):
+        valid = {"kind": "finding", "claim": "Клинический факт", "priority": "context"}
+        oversized = {"facts": [dict(valid) for _ in range(17)]}
+        with patch.object(sem.med, "split_chunks", return_value=["left", "right"]), \
+             patch.object(sem, "_json_call", side_effect=[
+                 oversized, {"facts": [valid]}, {"facts": [valid]}
+             ]) as call, patch.object(sem.med, "_progress"):
+            facts = sem._extract("x" * 1000)
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(call.call_count, 3)
+
+    def test_extract_reports_exact_fact_schema_violation(self):
+        malformed = {"facts": [{
+            "kind": "diagnosis", "claim": "Гипотония",
+            "priority": "essential", "extra": "unexpected"
+        }]}
+        with patch.object(sem, "_json_call", return_value=malformed):
+            with self.assertRaisesRegex(
+                med.SummaryError, "SEMANTIC_EXTRACT_FACT_1_KEYS_MISMATCH"
+            ):
+                sem._extract(SOURCE)
+
+    def test_failure_records_exact_block_and_stage(self):
+        blocks = [
+            {"id": "B0001", "start": 0, "end": 5, "text": "first"},
+            {"id": "B0002", "start": 5, "end": 11, "text": "second"},
+        ]
+        first = {"kind": "diagnosis", "claim": "Гипотония", "priority": "essential"}
+        with patch.object(sem, "_split_source", return_value=blocks), \
+             patch.object(sem, "_extract", side_effect=[
+                 [first], med.SummaryError("SEMANTIC_EXTRACT_FACT_1_INVALID_KIND")
+             ]), patch.object(sem, "_review", return_value=(
+                 [{"id": "F0001", "verdict": "supported", "reason": "Подтверждено"}], []
+             )), patch.object(med, "_progress"):
+            result = sem.summarize("synthetic", SOURCE)
+        self.assertEqual(result["failed_block_id"], "B0002")
+        self.assertEqual(result["failed_stage"], "extract")
+        self.assertEqual(result["quality_gate"]["failed_block_id"], "B0002")
+
     def test_only_semantic_v2_requires_extended_context(self):
         with patch.dict(med.os.environ, {"FINDINGS_PIPELINE_MODE": "semantic_v2",
                                           "FINDINGS_CONTEXT_PROFILE": "legacy"}):

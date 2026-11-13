@@ -17,6 +17,7 @@ import medical_summary as med
 
 CHUNK_CHARS = 2250
 MAX_EXTRACT_DEPTH = 4
+MAX_EXTRACT_FACTS = 16
 REVIEW_BATCH_SIZE = 8
 MAX_SELECTED = 26
 
@@ -25,7 +26,7 @@ KINDS = ["diagnosis", "event", "finding", "measurement",
 PRIORITIES = ["essential", "context"]
 EXTRACT_SCHEMA = {
     "type": "object", "properties": {
-        "facts": {"type": "array", "items": {"type": "object", "properties": {
+        "facts": {"type": "array", "maxItems": MAX_EXTRACT_FACTS, "items": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": KINDS},
             "claim": {"type": "string"},
             "priority": {"type": "string", "enum": PRIORITIES},
@@ -66,7 +67,7 @@ FINAL_REVIEW_SCHEMA = {
 }
 
 EXTRACT_PROMPT = """Ты читаешь только ОДИН фрагмент выписного эпикриза.
-Извлеки до 10 клинически значимых утверждений, без повторов и без выводов
+Извлеки до 16 клинически значимых утверждений, без повторов и без выводов
 от себя. Различай основное заболевание, фон, сопутствующее состояние,
 события госпитализации, результаты анализов, динамику, лечение в стационаре
 и рекомендации при выписке. Сохраняй отрицания (например, 'не выявлен'),
@@ -231,28 +232,53 @@ def _split_source(source: str) -> list[dict]:
     return result
 
 
+def _split_extract(text: str, depth: int, reason: str) -> list[dict]:
+    # Retry only when a complete response cannot fit the per-fragment fact budget.
+    if depth >= MAX_EXTRACT_DEPTH or len(text) < 460:
+        raise med.SummaryError(reason)
+    parts = med.split_chunks(text, max(300, len(text) // 2))
+    if len(parts) < 2:
+        raise med.SummaryError(reason)
+    med._progress("semantic_extract_split", depth + 1)
+    return [fact for part in parts for fact in _extract(part, depth + 1)]
+
+
 def _extract(text: str, depth: int = 0) -> list[dict]:
-    # Smaller fragments on length failure. No silent acceptance of truncated JSON.
+    # Smaller fragments on length/count failure. Never silently accept malformed facts.
     try:
         data = _json_call(EXTRACT_PROMPT, "ОРИГИНАЛЬНЫЙ ФРАГМЕНТ:\n" + text,
                           EXTRACT_SCHEMA, "SEMANTIC_EXTRACT")
     except med.SummaryError as exc:
-        if str(exc) != "SEMANTIC_EXTRACT_INCOMPLETE" or depth >= MAX_EXTRACT_DEPTH or len(text) < 460:
-            raise
-        parts = med.split_chunks(text, max(300, len(text) // 2))
-        if len(parts) < 2:
-            raise
-        med._progress("semantic_extract_split", depth + 1)
-        return [fact for part in parts for fact in _extract(part, depth + 1)]
-    facts = data["facts"]
-    if not isinstance(facts, list) or len(facts) > 16:
-        raise med.SummaryError("SEMANTIC_EXTRACT_SCHEMA_MISMATCH")
-    for fact in facts:
-        if (not isinstance(fact, dict) or set(fact) != {"kind", "claim", "priority"} or
-            fact["kind"] not in KINDS or fact["priority"] not in PRIORITIES or
-            not isinstance(fact["claim"], str) or not fact["claim"].strip() or
-            len(fact["claim"]) > 900):
-            raise med.SummaryError("SEMANTIC_EXTRACT_SCHEMA_MISMATCH")
+        if str(exc) == "SEMANTIC_EXTRACT_INCOMPLETE":
+            return _split_extract(text, depth, "SEMANTIC_EXTRACT_INCOMPLETE")
+        raise
+
+    facts = data.get("facts")
+    if not isinstance(facts, list):
+        raise med.SummaryError("SEMANTIC_EXTRACT_FACTS_NOT_LIST")
+    if len(facts) > MAX_EXTRACT_FACTS:
+        return _split_extract(text, depth, "SEMANTIC_EXTRACT_TOO_MANY_FACTS")
+
+    expected = {"kind", "claim", "priority"}
+    for index, fact in enumerate(facts, 1):
+        prefix = f"SEMANTIC_EXTRACT_FACT_{index}"
+        if not isinstance(fact, dict):
+            raise med.SummaryError(f"{prefix}_NOT_OBJECT")
+        keys = set(fact)
+        if keys != expected:
+            missing = ",".join(sorted(expected - keys)) or "-"
+            extra = ",".join(sorted(keys - expected)) or "-"
+            raise med.SummaryError(f"{prefix}_KEYS_MISMATCH_MISSING_{missing}_EXTRA_{extra}")
+        if fact["kind"] not in KINDS:
+            raise med.SummaryError(f"{prefix}_INVALID_KIND")
+        if fact["priority"] not in PRIORITIES:
+            raise med.SummaryError(f"{prefix}_INVALID_PRIORITY")
+        if not isinstance(fact["claim"], str):
+            raise med.SummaryError(f"{prefix}_CLAIM_NOT_STRING")
+        if not fact["claim"].strip():
+            raise med.SummaryError(f"{prefix}_CLAIM_EMPTY")
+        if len(fact["claim"]) > 900:
+            raise med.SummaryError(f"{prefix}_CLAIM_TOO_LONG")
     return facts
 
 
@@ -341,8 +367,12 @@ def summarize(document_id: str, source: str) -> dict:
             "Самопроверка выполняется той же Qwen в новой роли, не независимым экспертом.",
         ],
     }
+    current_block = None
+    current_stage = None
     try:
         for idx, block in enumerate(blocks, 1):
+            current_block = block["id"]
+            current_stage = "extract"
             candidates = _extract(block["text"])
             stage_facts = []
             for candidate in candidates:
@@ -351,6 +381,7 @@ def summarize(document_id: str, source: str) -> dict:
                 fact["numeric_check"] = numerical_guard(fact["claim"], block["text"])
                 stage_facts.append(fact)
                 output["fact_registry"].append(fact)
+            current_stage = "review"
             verdicts, omissions = _review(block, stage_facts)
             by_id = {v["id"]: v for v in verdicts}
             for fact in stage_facts:
@@ -366,12 +397,15 @@ def summarize(document_id: str, source: str) -> dict:
             })
             med._progress("semantic_extraction_review", idx, len(blocks))
 
+        current_block = None
+        current_stage = "selection"
         approved = [fact for fact in output["fact_registry"] if fact["accepted"]]
         if not approved:
             raise med.SummaryError("SEMANTIC_NO_APPROVED_FACTS")
         selected = _choose(approved)
         output["selected_ids"] = [fact["id"] for fact in selected]
         med._progress("semantic_selection", len(selected), len(approved))
+        current_stage = "synthesis"
         data = _json_call(SYNTH_PROMPT,
                           json.dumps({"selected_verified_facts": [
                               {"id": fact["id"], "claim": fact["claim"]}
@@ -383,6 +417,7 @@ def summarize(document_id: str, source: str) -> dict:
         output["comment"] = summary.strip()
         med._progress("semantic_synthesis", 1, 1)
 
+        current_stage = "final_review"
         numeric = numerical_guard(output["comment"], source)
         semantic = _final_review(source, output["comment"])
         med._progress("semantic_final_review", 1, 1)
@@ -413,8 +448,11 @@ def summarize(document_id: str, source: str) -> dict:
         med._progress("semantic_completed", 1, 1)
     except med.SummaryError as exc:
         output["error"] = str(exc)
+        output["failed_block_id"] = current_block
+        output["failed_stage"] = current_stage
         output["quality_gate"] = {
             "automated_gate_passed": False, "stage_error": str(exc),
+            "failed_block_id": current_block, "failed_stage": current_stage,
         }
         med._progress("semantic_failed", 1, 1)
     return output
