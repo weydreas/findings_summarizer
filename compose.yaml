@@ -9,6 +9,8 @@ services:
       LLM_MODEL: local
       # Use 32k only after the shared llama.cpp server is upgraded and verified.
       FINDINGS_CONTEXT_PROFILE: ${FINDINGS_CONTEXT_PROFILE:-legacy}
+      # Explicit opt-in. Legacy remains the default.
+      FINDINGS_PIPELINE_MODE: ${FINDINGS_PIPELINE_MODE:-legacy}
     networks:
       - qwen_private
     read_only: true

@@ -58,6 +58,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
     print(f"Started UTC: {started_at.isoformat(timespec='milliseconds')}", flush=True)
     print(f"Processing: {folder}", flush=True)
     print(f"Context profile: {os.environ.get('FINDINGS_CONTEXT_PROFILE', 'legacy')}", flush=True)
+    print(f"Pipeline mode: {os.environ.get('FINDINGS_PIPELINE_MODE', 'legacy')}", flush=True)
     print(f"Progress log: {folder / 'stderr.log'}", flush=True)
     try:
         with (folder / "stderr.log").open("xb") as log:
@@ -88,7 +89,7 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
     save_private_json(folder / "result.json", result)
     direct = {
         "ok": result.get("ok", False),
-        "method": "direct",
+        "method": result.get("primary_method", "direct"),
         "document_id": result.get("document_id"),
         "comment": result.get("comment"),
         "restored_text": result.get("restored_text"),
@@ -103,6 +104,12 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
     if not isinstance(comparison, dict):
         comparison = {"ok": False, "method": "extract", "error": "NOT_RUN"}
     save_private_json(folder / "extract.json", comparison)
+    if result.get("pipeline_mode") == "evidence_v1":
+        # Artifacts stay private on the host, never inside Git or the shared bot.
+        save_private_json(folder / "facts.json", result.get("fact_registry", []))
+        save_private_json(folder / "sections.json", result.get("sections", []))
+        save_private_json(folder / "quality.json", result.get("quality_gate", {}))
+        save_private_json(folder / "drafts.json", result.get("draft_parts", []))
     save_private_json(folder / "run.json", {
         "document_id": result.get("document_id"),
         "timestamp_utc": stamp,
@@ -110,8 +117,10 @@ def run_one(source_path: Path, *, model_label: str = "qwen3-1.7b-q4km") -> tuple
         "finished_at_utc": finished_at.isoformat(timespec="milliseconds"),
         "duration_seconds": duration_seconds,
         "exit_code": exit_code,
-        "primary_method": "direct",
+        "primary_method": result.get("primary_method", "direct"),
         "comparison_method": "extract",
+        "pipeline_mode": os.environ.get("FINDINGS_PIPELINE_MODE", "legacy"),
+        "automated_gate_passed": (result.get("quality_gate") or {}).get("automated_gate_passed"),
         "model_label": model_label,
         "context_profile": os.environ.get("FINDINGS_CONTEXT_PROFILE", "legacy"),
         "schema_version": result.get("schema_version"),
@@ -131,6 +140,8 @@ def main() -> int:
         return 1
     print(f"Results saved: {folder}")
     print("Files: input.json, direct.json, extract.json, result.json, run.json")
+    if os.environ.get("FINDINGS_PIPELINE_MODE") == "evidence_v1":
+        print("Evidence files: sections.json, facts.json, drafts.json, quality.json")
     return code
 
 
