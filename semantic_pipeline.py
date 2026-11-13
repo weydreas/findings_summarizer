@@ -387,6 +387,10 @@ def summarize(document_id: str, source: str) -> dict:
         semantic = _final_review(source, output["comment"])
         med._progress("semantic_final_review", 1, 1)
 
+        reviewer_omissions = [
+            {"source_block_id": r["source_block_id"], "claims": r["reported_omissions"]}
+            for r in output["reviews"] if r["reported_omissions"]
+        ]
         output["quality_gate"] = {
             "fresh_role_review_per_block": True,
             "same_model_self_review": True,
@@ -394,11 +398,13 @@ def summarize(document_id: str, source: str) -> dict:
             "accepted_count": len(approved),
             "rejected_count": len(output["fact_registry"]) - len(approved),
             "reported_omissions": sum(len(r["reported_omissions"]) for r in output["reviews"]),
+            "omission_reports": reviewer_omissions,
             "numeric_date_unit_issues": numeric,
             "semantic_verdict": semantic["verdict"],
             "semantic_issues": semantic["issues"],
             "automated_gate_passed": semantic["verdict"] == "pass"
-                                     and not _has_issues(numeric),
+                                     and not _has_issues(numeric)
+                                     and not reviewer_omissions,
         }
         output["ok"] = output["quality_gate"]["automated_gate_passed"]
         if not output["ok"]:
