@@ -74,6 +74,34 @@ class ArchiveTests(unittest.TestCase):
                 self.assertIn("FINDINGS_PROGRESS=1", call.args[0])
                 self.assertTrue(hasattr(call.kwargs["stderr"], "write"))
 
+    def test_evidence_archive_keeps_private_stages_and_failed_gate(self):
+        with TemporaryDirectory() as d:
+            tmp = Path(d)
+            source = tmp / "synthetic.json"
+            source.write_text('{"document_id":"synthetic","content":"Тест."}', encoding="utf-8")
+            output = {
+                "ok": False, "pipeline_mode": "evidence_v1",
+                "primary_method": "evidence",
+                "document_id": "synthetic", "comment": "Черновик.",
+                "fact_registry": [{"id": "F0001", "quote": "Тест."}],
+                "sections": [{"block_id": "B0001", "start": 0, "end": 5}],
+                "draft_parts": ["Черновик."],
+                "quality_gate": {"automated_gate_passed": False,
+                                 "issues": ["MISSING_REQUIRED_FACTS"]},
+            }
+            docker_result = SimpleNamespace(returncode=1, stdout=json.dumps(output).encode())
+            with patch.object(run_test, "RESULTS_ROOT", tmp / "results"), \
+                 patch.dict(run_test.os.environ, {"FINDINGS_PIPELINE_MODE": "evidence_v1"}), \
+                 patch.object(run_test.subprocess, "run", return_value=docker_result):
+                folder, code = run_test.run_one(source)
+            self.assertNotEqual(code, 0)
+            for path in ("facts.json", "sections.json", "quality.json", "drafts.json"):
+                self.assertTrue((folder / path).exists(), path)
+                self.assertEqual((folder / path).stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads((folder / "run.json").read_text())["pipeline_mode"], "evidence_v1")
+            self.assertFalse(json.loads((folder / "quality.json").read_text())["automated_gate_passed"])
+            self.assertEqual(json.loads((folder / "direct.json").read_text())["method"], "evidence")
+
     def test_docker_failure_archives_errors_not_a_false_success(self):
         with TemporaryDirectory() as d:
             tmp = Path(d)
